@@ -61,6 +61,8 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
     private DeepAR deepAR;
     private GLSurfaceView surfaceView;
     private DeepARRenderer renderer;
+    private ImageProxyRenderer imageProxyRenderer;
+    private boolean useImageProxyRenderer = true; // set true to render ImageProxy directly
 
     private FrameLayout remoteViewContainer;
     WebRTCClient webRTCClient;
@@ -101,11 +103,14 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
         surfaceView = new GLSurfaceView(this);
         surfaceView.setEGLContextClientVersion(2);
         surfaceView.setEGLConfigChooser(8,8,8,8,16,0);
-        renderer = new DeepARRenderer(deepAR ,webRTCClient, this);
-
-        surfaceView.setEGLContextFactory(new DeepARRenderer.MyContextFactory(renderer));
-
-        surfaceView.setRenderer(renderer);
+        if (useImageProxyRenderer) {
+            imageProxyRenderer = new ImageProxyRenderer();
+            surfaceView.setRenderer(imageProxyRenderer);
+        } else {
+            renderer = new DeepARRenderer(deepAR ,webRTCClient, this);
+            surfaceView.setEGLContextFactory(new DeepARRenderer.MyContextFactory(renderer));
+            surfaceView.setRenderer(renderer);
+        }
         surfaceView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
 
@@ -260,6 +265,15 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
         imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this), new ImageAnalysis.Analyzer() {
             @Override
             public void analyze(@NonNull ImageProxy image) {
+                if (useImageProxyRenderer && imageProxyRenderer != null) {
+                    imageProxyRenderer.submitImage(
+                            image,
+                            lensFacing == CameraSelector.LENS_FACING_FRONT,
+                            image.getImageInfo().getRotationDegrees()
+                    );
+                    image.close();
+                    return;
+                }
                 ByteBuffer yBuffer = image.getPlanes()[0].getBuffer();
                 ByteBuffer uBuffer = image.getPlanes()[1].getBuffer();
                 ByteBuffer vBuffer = image.getPlanes()[2].getBuffer();
