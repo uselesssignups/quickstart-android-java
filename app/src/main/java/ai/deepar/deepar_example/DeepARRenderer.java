@@ -155,8 +155,13 @@ public class DeepARRenderer implements GLSurfaceView.Renderer {
 
         android.opengl.Matrix.setIdentityM(this.matrix, 0);
 
-        new Overlay(context.getApplicationContext(),R.drawable.ic_launcher,0,0);
-        new Overlay(context, "Hello", 64, Color.WHITE, 0f, 0f);
+        Overlay.rendererWidth = textureWidth;
+        Overlay.rendererHeight = textureHeight;
+
+        Overlay logo = new Overlay(context.getApplicationContext(),R.drawable.ic_launcher,0,0);
+        logo.setSize(0.9f);
+        new Overlay(context, "Hello", 64, Color.RED, 0f, 0f);
+
     }
 
     @Override
@@ -195,6 +200,7 @@ public class DeepARRenderer implements GLSurfaceView.Renderer {
     public GLTextureCopier textureCopier=null;
     @Override
     public void onDrawFrame(GL10 gl) {
+        // ---- basic preview draw (unchanged) ----
         GLES20.glFinish();
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
 
@@ -207,6 +213,7 @@ public class DeepARRenderer implements GLSurfaceView.Renderer {
 
         surfaceTexture.getTransformMatrix(matrix);
 
+        // Draw preview (OES) to screen
         GLES20.glUseProgram(program);
         int positionHandle = GLES20.glGetAttribLocation(program, "vPosition");
         GLES20.glEnableVertexAttribArray(positionHandle);
@@ -230,106 +237,135 @@ public class DeepARRenderer implements GLSurfaceView.Renderer {
 
         final long captureTimeNs = TimeUnit.MILLISECONDS.toNanos(SystemClock.elapsedRealtime());
 
-        for (Overlay overlay: Overlay.overlayArray) {
-            overlay.drawOverlay();
-        }
-
+        // ---- send path: ensure overlays are embedded ----
         if (callInProgress) {
-
-            // 0) Ensure copier created on GL thread
+            // Ensure textureCopier exists and initialized (true = source is OES)
             if (textureCopier == null) {
                 textureCopier = new GLTextureCopier();
-                textureCopier.init(true); // must run on GL thread
+                textureCopier.init(true);
             }
 
-            // 1) Save GL state (minimal)
+            // Save minimal GL state so we can restore later
             int[] tmp1 = new int[1];
             int[] tmp4 = new int[4];
             GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, tmp1, 0); int prevFbo = tmp1[0];
             GLES20.glGetIntegerv(GLES20.GL_CURRENT_PROGRAM, tmp1, 0); int prevProgram = tmp1[0];
             GLES20.glGetIntegerv(GLES20.GL_ACTIVE_TEXTURE, tmp1, 0); int prevActive = tmp1[0];
             GLES20.glGetIntegerv(GLES20.GL_TEXTURE_BINDING_2D, tmp1, 0); int prevTex2D = tmp1[0];
-            try { GLES20.glGetIntegerv(GLES11Ext.GL_TEXTURE_BINDING_EXTERNAL_OES, tmp1, 0); } catch(Exception e){ tmp1[0]=0; }
+            try { GLES20.glGetIntegerv(GLES11Ext.GL_TEXTURE_BINDING_EXTERNAL_OES, tmp1, 0); } catch (Exception e) { tmp1[0] = 0; }
             int prevTexOES = tmp1[0];
             GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, tmp4, 0);
             int prevVpX = tmp4[0], prevVpY = tmp4[1], prevVpW = tmp4[2], prevVpH = tmp4[3];
 
+            // Grab transform matrix for conversions
             float[] texMatrix = new float[16];
             surfaceTexture.getTransformMatrix(texMatrix);
 
-            if (textureCopier == null) {
-                textureCopier = new GLTextureCopier();
-                textureCopier.init(true); // true for OES
-            }
+            // 1) Make an RGBA copy of the OES texture into a GL_TEXTURE_2D
+            int copiedTex = textureCopier.copy(texture, textureWidth, textureHeight, texMatrix);
 
-            // 2) Make an RGBA copy of current OES texture (copiedTex is GL_TEXTURE_2D)
-            int copiedTex = textureCopier.copy(texture, textureWidth, textureHeight,texMatrix );
+            // Safety: ensure copy finished
+            GLES20.glFinish();
 
-            // 3) make sure copy finished and unbind framebuffer (copy should do this, but be safe)
-            GLES20.glFlush();
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prevFbo);
-            GLES20.glViewport(prevVpX, prevVpY, prevVpW, prevVpH);
+            if (copiedTex != 0) {
+                // 2) Create a temporary FBO and attach copiedTex so we can draw overlays onto it
+                int[] fbo = new int[1];
+                GLES20.glGenFramebuffers(1, fbo, 0);
+                int tempFbo = fbo[0];
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, tempFbo);
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                        GLES20.GL_TEXTURE_2D, copiedTex, 0);
 
-            // 4) build the correct webRTC matrix (float[]) — IMPORTANT: use the returned float[]
-            android.graphics.Matrix androidMat = new android.graphics.Matrix();
-            androidMat.setValues(matrix);
-            androidMat.postTranslate(0.0f, 1.0f);
+                int status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
+                if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+                    Log.e("DeepARRenderer", "FBO incomplete status=" + status);
+                } else {
+                    // 3) Set viewport to texture size (so overlay coordinates map correctly)
+                    GLES20.glViewport(0, 0, textureWidth, textureHeight);
 
-            // 5) Handler that owns EGL context for conversion: use surfaceTextureHelper handler if available
-            Handler eglHandler = null;
-            if (webRTCClient != null && webRTCClient.surfaceTextureHelper != null) {
-                eglHandler = webRTCClient.surfaceTextureHelper.getHandler();
-            }
-            if (eglHandler == null) {
-                // fallback - must be the GL thread handler; if null, conversion may fail
-                eglHandler = handler;
-            }
-            android.graphics.Matrix bufferMatrix = convertMatrix(texMatrix);
-            // 6) Wrap copied texture. NOTE: pass VideoFrame.TextureBuffer.Type.RGB since copiedTex is a 2D RGBA texture
-            TextureBufferImpl buffer = new TextureBufferImpl(
-                    textureWidth,
-                    textureHeight,
-                    VideoFrame.TextureBuffer.Type.RGB,
-                    copiedTex,
-                    bufferMatrix,
-                    eglHandler,
-                    yuvConverter, // pass the converter as expected by your TextureBufferImpl overloads
-                    () -> {
-                        // cleanup callback — will run on eglHandler when buffer is released
-                        GLES20.glDeleteTextures(1, new int[]{copiedTex}, 0);
+                    // IMPORTANT: If you used any program earlier, unbind it to draw overlays with their own program
+                    GLES20.glUseProgram(0);
+
+                    // 4) Draw overlays onto the copiedTex via the bound FBO
+                    //    Note: overlay.drawOverlay() expects GL state for drawing; your overlay enables blending etc.
+                    for (Overlay overlay : Overlay.overlayArray) {
+                        overlay.draw();
                     }
-            );
 
-            // 7) Convert to I420 (may return null) — catch exceptions
-            VideoFrame.I420Buffer i420Buffer = null;
-            try {
-                i420Buffer = yuvConverter.convert(buffer);
-            } catch (Exception e) {
-                Log.e("DeepARRenderer", "convert() threw", e);
-            }
-
-            if (i420Buffer != null) {
-                try {
-                    VideoFrame frame = new VideoFrame(i420Buffer, 0, captureTimeNs);
-                    ((CustomVideoCapturer) webRTCClient.getVideoCapturer()).writeFrame(frame);
-                } finally {
+                    // Flush to ensure drawing is finished before conversion
+                    GLES20.glFlush();
                 }
+
+                // 5) Unbind and delete the temporary FBO (texture remains)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prevFbo);
+                GLES20.glDeleteFramebuffers(1, fbo, 0);
+
+                // 6) Restore previous viewport
+                GLES20.glViewport(prevVpX, prevVpY, prevVpW, prevVpH);
+
+                // 7) Prepare matrix and EGL handler for WebRTC wrapper
+                android.graphics.Matrix bufferMatrix = convertMatrix(texMatrix);
+
+                Handler eglHandler = null;
+                if (webRTCClient != null && webRTCClient.surfaceTextureHelper != null) {
+                    eglHandler = webRTCClient.surfaceTextureHelper.getHandler();
+                }
+                if (eglHandler == null) {
+                    eglHandler = handler; // fallback - must be GL thread handler ideally
+                }
+
+                // 8) Wrap copiedTex into TextureBufferImpl (RGB because copy is GL_TEXTURE_2D RGBA)
+                TextureBufferImpl buffer = new TextureBufferImpl(
+                        textureWidth,
+                        textureHeight,
+                        VideoFrame.TextureBuffer.Type.RGB,
+                        copiedTex,
+                        bufferMatrix,
+                        eglHandler,
+                        yuvConverter,
+                        () -> {
+                            // Cleanup when WebRTC releases the frame — must run on eglHandler (GL thread)
+                            GLES20.glDeleteTextures(1, new int[]{copiedTex}, 0);
+                            Log.d("DeepARRenderer", "Deleted copiedTex " + copiedTex + " in release callback");
+                        }
+                );
+
+                // 9) Convert to I420 and send
+                VideoFrame.I420Buffer i420Buffer = null;
+                try {
+                    i420Buffer = yuvConverter.convert(buffer);
+                } catch (Exception e) {
+                    Log.e("DeepARRenderer", "convert() threw", e);
+                }
+
+                if (i420Buffer != null) {
+                    try {
+                        VideoFrame frame = new VideoFrame(i420Buffer, 0, captureTimeNs);
+                        ((CustomVideoCapturer) webRTCClient.getVideoCapturer()).writeFrame(frame);
+                        // frame.release() usually not needed because writeFrame should take ownership; check your API.
+                        // If required by your API, call frame.release() here.
+                    } catch (Exception e) {
+                        Log.e("DeepARRenderer", "writeFrame threw", e);
+                    }
+                } else {
+                    Log.e("DeepARRenderer", "YuvConverter returned null — conversion failed");
+                }
+
+                // 10) Release wrapper (triggers cleanup callback later on EGL handler)
+                buffer.release();
             } else {
-                Log.e("DeepARRenderer", "YuvConverter returned null — conversion failed");
+                Log.e("DeepARRenderer", "copiedTex==0 — copy failed");
             }
 
-            // 8) release wrapper (triggers cleanup callback on EGL handler)
-            buffer.release();
-
-            // 9) restore GL state
+            // 11) Restore saved GL state (best-effort)
             GLES20.glUseProgram(prevProgram);
             GLES20.glActiveTexture(prevActive);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, prevTex2D);
             if (prevTexOES != 0) GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, prevTexOES);
             GLES20.glViewport(prevVpX, prevVpY, prevVpW, prevVpH);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prevFbo);
-        }
-    }
+        } // end callInProgress
+    } // end onDrawFr
     private static Matrix convertMatrix(float[] m) {
         Matrix matrix = new Matrix();
 
@@ -562,185 +598,178 @@ public class DeepARRenderer implements GLSurfaceView.Renderer {
         program = -1;
     }
 }
- class Overlay {
+class Overlay {
     private int texture = -1;
-    private int overlayProgram = -1;
-    private FloatBuffer overlayVertexBuffer;
-    private FloatBuffer overlayUvBuffer;
+    private int program = -1;
+    private FloatBuffer vertexBuffer;
+    private FloatBuffer uvBuffer;
 
-    private float size = 0.3f;   // Width/height in NDC
-    private float centerX = 0f;  // -1..1
-    private float centerY = 0f;  // -1..1
+    private float size = 0.3f;    // relative size (NDC units)
+    private float cx = 0f, cy = 0f;
+    private float overlayAspect = 1f;
+    private float rendererAspect = 1f;
+
+    public static int rendererWidth,rendererHeight;
     public static ArrayList<Overlay> overlayArray = new ArrayList<>();
-    private final String vShader =
-            "attribute vec4 aPos;\n" +
-                    "attribute vec2 aTex;\n" +
-                    "varying vec2 vTex;\n" +
-                    "void main() {\n" +
-                    "  gl_Position = aPos;\n" +
-                    "  vTex = aTex;\n" +
-                    "}\n";
+    public Overlay(Context ctx, int resId, float x, float y) {
+        cx = x;
+        cy = y;
+        rendererAspect = (float) rendererWidth / rendererHeight;
 
-    private final String fShader =
-            "precision mediump float;\n" +
-                    "varying vec2 vTex;\n" +
-                    "uniform sampler2D tex;\n" +
-                    "void main() {\n" +
-                    "    vec4 c = texture2D(tex, vTex);\n" +
-                    "    gl_FragColor = c;\n" +
-                    "}\n";
+        Bitmap bmp = BitmapFactory.decodeResource(ctx.getResources(), resId);
+        overlayAspect = (float) bmp.getWidth() / bmp.getHeight();
 
-    public Overlay(Context context, String text, int textSize, int color, float x, float y) {
-        centerX = x;
-        centerY = y;
+        texture = loadTexture(bmp);
+        bmp.recycle();
 
-        // Prepare paint
+        initProgram();
+        initBuffers();
+
+        Overlay.overlayArray.add(this);
+    }
+
+    public Overlay(Context ctx, String text, int textSize, int color, float x, float y) {
+        cx = x;
+        cy = y;
+        rendererAspect = (float) rendererWidth / rendererHeight;
+
         Paint paint = new Paint();
         paint.setTextSize(textSize);
         paint.setColor(color);
         paint.setAntiAlias(true);
-        paint.setTextAlign(Paint.Align.LEFT);
 
         Rect bounds = new Rect();
         paint.getTextBounds(text, 0, text.length(), bounds);
 
-        int width = (int) Math.ceil(paint.measureText(text));
-        int height = (int) Math.ceil(Math.abs(bounds.top) + Math.abs(bounds.bottom));
-        if (width == 0) width = 1;
-        if (height == 0) height = 1;
+        int w = (int) Math.ceil(paint.measureText(text));
+        int h = (int) Math.ceil(Math.abs(bounds.top) + Math.abs(bounds.bottom));
+        if (w == 0) w = 1;
+        if (h == 0) h = 1;
+        overlayAspect = (float) w / h;
 
-        Bitmap bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bmp);
-        canvas.drawColor(Color.TRANSPARENT);
-        canvas.drawText(text, 0, Math.abs(bounds.top), paint);
+        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(bmp);
+        c.drawColor(Color.TRANSPARENT);
+        c.drawText(text, 0, Math.abs(bounds.top), paint);
 
-        texture = loadTextureFromBitmap(bmp);
+        texture = loadTexture(bmp);
         bmp.recycle();
 
-        initShader();
+        initProgram();
         initBuffers();
-
-        this.overlayArray.add(this);
+        Overlay.overlayArray.add(this);
     }
 
-    public Overlay(Context context, int resId, float x, float y) {
-        centerX = x;
-        centerY = y;
+    // ------------------------ New Function ------------------------
+    /**
+     * Set overlay size (in normalized device coordinates).
+     * 1.0 = full width of screen, 0.5 = half, etc.
+     * Automatically updates vertex buffer.
+     */
+    public void setSize(float newSize) {
+        this.size = newSize;
+        updateVertexBuffer();
+    }
+    // --------------------------------------------------------------
 
-        Bitmap bmp = BitmapFactory.decodeResource(context.getResources(), resId);
-        texture = loadTextureFromBitmap(bmp);
-        bmp.recycle();
+    private void initProgram() {
+        String vsh =
+                "attribute vec4 aPos;\n" +
+                        "attribute vec2 aTex;\n" +
+                        "varying vec2 vTex;\n" +
+                        "void main(){ gl_Position=aPos; vTex=aTex; }";
+        String fsh =
+                "precision mediump float;\n" +
+                        "varying vec2 vTex;\n" +
+                        "uniform sampler2D tex;\n" +
+                        "void main(){ gl_FragColor=texture2D(tex,vTex); }";
 
-        initShader();
-        initBuffers();
-        this.overlayArray.add(this);
+        int v = loadShader(GLES20.GL_VERTEX_SHADER, vsh);
+        int f = loadShader(GLES20.GL_FRAGMENT_SHADER, fsh);
+        program = GLES20.glCreateProgram();
+        GLES20.glAttachShader(program, v);
+        GLES20.glAttachShader(program, f);
+        GLES20.glLinkProgram(program);
     }
 
-    private int loadTextureFromBitmap(Bitmap bmp) {
-        int[] texId = new int[1];
-        GLES20.glGenTextures(1, texId, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId[0]);
+    private void initBuffers() {
+        float[] uv = {0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f};
+        uvBuffer = ByteBuffer.allocateDirect(uv.length * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer();
+        uvBuffer.put(uv).position(0);
+        updateVertexBuffer();
+    }
+
+    private void updateVertexBuffer() {
+        float halfW = size / 2f;
+        float halfH = halfW / overlayAspect * rendererAspect;
+
+        float[] v = {
+                cx - halfW, cy + halfH, 0f,
+                cx + halfW, cy + halfH, 0f,
+                cx - halfW, cy - halfH, 0f,
+                cx + halfW, cy - halfH, 0f
+        };
+
+        if (vertexBuffer == null)
+            vertexBuffer = ByteBuffer.allocateDirect(v.length * 4)
+                    .order(ByteOrder.nativeOrder())
+                    .asFloatBuffer();
+        vertexBuffer.clear();
+        vertexBuffer.put(v).position(0);
+    }
+
+    public void updateRendererSize(int w, int h) {
+        rendererAspect = (float) w / h;
+        updateVertexBuffer();
+    }
+
+    public void draw() {
+        if (program <= 0 || texture <= 0) return;
+
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUseProgram(program);
+
+        int posLoc = GLES20.glGetAttribLocation(program, "aPos");
+        int texLoc = GLES20.glGetAttribLocation(program, "aTex");
+        int samplerLoc = GLES20.glGetUniformLocation(program, "tex");
+
+        GLES20.glEnableVertexAttribArray(posLoc);
+        GLES20.glVertexAttribPointer(posLoc, 3, GLES20.GL_FLOAT, false, 12, vertexBuffer);
+
+        GLES20.glEnableVertexAttribArray(texLoc);
+        GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 8, uvBuffer);
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
+        GLES20.glUniform1i(samplerLoc, 0);
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+
+        GLES20.glDisableVertexAttribArray(posLoc);
+        GLES20.glDisableVertexAttribArray(texLoc);
+        GLES20.glUseProgram(0);
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    private int loadTexture(Bitmap bmp) {
+        int[] id = new int[1];
+        GLES20.glGenTextures(1, id, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id[0]);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0);
-        return texId[0];
+        return id[0];
     }
 
-    // ------------------- Shader setup -------------------
-    private void initShader() {
-        int v = loadShader(GLES20.GL_VERTEX_SHADER, vShader);
-        int f = loadShader(GLES20.GL_FRAGMENT_SHADER, fShader);
-
-        overlayProgram = GLES20.glCreateProgram();
-        GLES20.glAttachShader(overlayProgram, v);
-        GLES20.glAttachShader(overlayProgram, f);
-        GLES20.glLinkProgram(overlayProgram);
-
-        int[] linkStatus = new int[1];
-        GLES20.glGetProgramiv(overlayProgram, GLES20.GL_LINK_STATUS, linkStatus, 0);
-        if (linkStatus[0] == 0) {
-            Log.e("Overlay", "Program link failed: " + GLES20.glGetProgramInfoLog(overlayProgram));
-            GLES20.glDeleteProgram(overlayProgram);
-            overlayProgram = 0;
-        }
-    }
-
-    // ------------------- Vertex buffers -------------------
-    private void initBuffers() {
-        float[] uvs = {0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f};
-        overlayUvBuffer = ByteBuffer.allocateDirect(uvs.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
-        overlayUvBuffer.put(uvs).position(0);
-
-        updateVertexBuffer();
-    }
-
-    private void updateVertexBuffer() {
-        float half = size / 2f;
-        float[] verts = {
-                centerX - half, centerY + half, 0f,
-                centerX + half, centerY + half, 0f,
-                centerX - half, centerY - half, 0f,
-                centerX + half, centerY - half, 0f
-        };
-
-        if (overlayVertexBuffer == null)
-            overlayVertexBuffer = ByteBuffer.allocateDirect(verts.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
-
-        overlayVertexBuffer.clear();
-        overlayVertexBuffer.put(verts).position(0);
-    }
-
-    public void moveTo(float x, float y) {
-        centerX = x;
-        centerY = y;
-        updateVertexBuffer();
-    }
-
-    public void drawOverlay() {
-        if (overlayProgram > 0 && texture > 0) {
-            GLES20.glEnable(GLES20.GL_BLEND);
-            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-
-            GLES20.glUseProgram(overlayProgram);
-
-            int posLoc = GLES20.glGetAttribLocation(overlayProgram, "aPos");
-            int texLoc = GLES20.glGetAttribLocation(overlayProgram, "aTex");
-            int samplerLoc = GLES20.glGetUniformLocation(overlayProgram, "tex");
-
-            GLES20.glEnableVertexAttribArray(posLoc);
-            GLES20.glVertexAttribPointer(posLoc, 3, GLES20.GL_FLOAT, false, 12, overlayVertexBuffer);
-
-            GLES20.glEnableVertexAttribArray(texLoc);
-            GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 8, overlayUvBuffer);
-
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
-            GLES20.glUniform1i(samplerLoc, 0);
-
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-
-            GLES20.glDisableVertexAttribArray(posLoc);
-            GLES20.glDisableVertexAttribArray(texLoc);
-            GLES20.glUseProgram(0);
-
-            GLES20.glDisable(GLES20.GL_BLEND);
-        }
-    }
-
-    private int loadShader(int type, String code) {
-        int shader = GLES20.glCreateShader(type);
-        GLES20.glShaderSource(shader, code);
-        GLES20.glCompileShader(shader);
-
-        int[] compiled = new int[1];
-        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0);
-        if (compiled[0] == 0) {
-            Log.e("Overlay", "Shader compile failed: " + GLES20.glGetShaderInfoLog(shader));
-            GLES20.glDeleteShader(shader);
-            return 0;
-        }
-        return shader;
+    private int loadShader(int type, String src) {
+        int s = GLES20.glCreateShader(type);
+        GLES20.glShaderSource(s, src);
+        GLES20.glCompileShader(s);
+        return s;
     }
 }
