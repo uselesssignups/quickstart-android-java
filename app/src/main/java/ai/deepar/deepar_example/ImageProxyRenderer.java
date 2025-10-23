@@ -227,7 +227,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
 
         boolean upload = false;
         ByteBuffer y = null, u = null, v = null;
-        int w = 0, h = 0;
+        int newW = 0, newH = 0;
         frameLock.lock();
         try {
             if (frameAvailable && yData != null && uData != null && vData != null) {
@@ -235,7 +235,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
                 u = uData.duplicate();
                 v = vData.duplicate();
                 y.position(0); u.position(0); v.position(0);
-                w = frameWidth; h = frameHeight;
+                newW = frameWidth; newH = frameHeight;
                 frameAvailable = false;
                 upload = true;
             }
@@ -243,22 +243,29 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
             frameLock.unlock();
         }
 
-        if (!upload) {
+        if (!texturesInitialized && !upload) {
+            return;
+        }
+
+        int drawW = upload ? newW : frameWidth;
+        int drawH = upload ? newH : frameHeight;
+        if (drawW <= 0 || drawH <= 0) {
             return;
         }
 
         // Update geometry to preserve aspect ratio (fit center)
-        updateScaledPositions(w, h);
+        updateScaledPositions(drawW, drawH);
 
         GLES20.glUseProgram(program);
 
-        int chromaW = w / 2;
-        int chromaH = h / 2;
+        int chromaW = drawW / 2;
+        int chromaH = drawH / 2;
 
         if (!texturesInitialized) {
+            // First allocation requires valid buffers
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texY);
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, w, h, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, y);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, drawW, drawH, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, y);
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texU);
@@ -269,10 +276,11 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
             GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, chromaW, chromaH, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, v);
 
             texturesInitialized = true;
-        } else {
+        } else if (upload) {
+            // Update textures with latest frame
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texY);
-            GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, w, h, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, y);
+            GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, drawW, drawH, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, y);
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texU);
@@ -281,16 +289,27 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texV);
             GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, chromaW, chromaH, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, v);
+        } else {
+            // No upload: ensure textures are bound
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texY);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texU);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texV);
         }
 
+        // Samplers
         GLES20.glUniform1i(uYLoc, 0);
         GLES20.glUniform1i(uULoc, 1);
         GLES20.glUniform1i(uVLoc, 2);
 
+        // Transform
         FloatBuffer mat = ByteBuffer.allocateDirect(9 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
         mat.put(texTransform).position(0);
         GLES20.glUniformMatrix3fv(uTexTransformLoc, 1, false, mat);
 
+        // Attributes
         GLES20.glEnableVertexAttribArray(aPositionLoc);
         GLES20.glVertexAttribPointer(aPositionLoc, 3, GLES20.GL_FLOAT, false, 0, positionBuffer);
         GLES20.glEnableVertexAttribArray(aTexCoordLoc);
@@ -357,7 +376,8 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         float[] rot = rotate(rotationDegrees);
         float[] t2 = translate(0.5f, 0.5f);
 
-        float[] m = multiply(t2, multiply(rot, multiply(sFlipY, multiply(sMirror, t1))));
+        // Apply flip AFTER rotation to keep width/height handling consistent
+        float[] m = multiply(t2, multiply(sFlipY, multiply(rot, multiply(sMirror, t1))));
         System.arraycopy(m, 0, texTransform, 0, 9);
     }
 
