@@ -104,8 +104,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         final int width = crop.width();
         final int height = crop.height();
         setMirror(mirror);
-        // CameraX gives clockwise rotation needed to display upright.
-        // Rotate sampling in the opposite direction to correct orientation.
+        // CameraX provides clockwise rotation to apply; counter-rotate sampling.
         setRotationDegrees(-rotationDegrees);
 
         ImageProxy.PlaneProxy yPlane = image.getPlanes()[0];
@@ -369,7 +368,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         float xScale = 1f;
         float yScale = 1f;
         if (surfaceWidth > 0 && surfaceHeight > 0 && imgW > 0 && imgH > 0) {
-            boolean swap = Math.abs(rotationDegrees) % 180 != 0;
+            boolean swap = ((rotationDegrees % 360) + 360) % 360 == 90 || ((rotationDegrees % 360) + 360) % 360 == 270;
             int effW = swap ? imgH : imgW;
             int effH = swap ? imgW : imgH;
 
