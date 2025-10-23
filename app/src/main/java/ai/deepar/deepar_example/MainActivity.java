@@ -274,10 +274,13 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
             @Override
             public void analyze(@NonNull ImageProxy image) {
                 if (useImageProxyRenderer && imageProxyRenderer != null) {
+                    boolean isFront = lensFacing == CameraSelector.LENS_FACING_FRONT;
+                    int degrees = image.getImageInfo().getRotationDegrees();
+                    int applyDegrees = isFront ? degrees : -degrees;
                     imageProxyRenderer.submitImage(
                             image,
-                            lensFacing == CameraSelector.LENS_FACING_FRONT,
-                            image.getImageInfo().getRotationDegrees()
+                            isFront,
+                            applyDegrees
                     );
                     image.close();
                     return;
