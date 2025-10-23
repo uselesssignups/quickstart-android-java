@@ -260,6 +260,9 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         surfaceWidth = width;
         surfaceHeight = height;
         GLES20.glViewport(0, 0, width, height);
+        // Update overlay coordinate space
+        Overlay.rendererWidth = width;
+        Overlay.rendererHeight = height;
     }
 
     @Override
@@ -357,6 +360,11 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+
+        // Draw overlays on top (screen compositing)
+        for (Overlay overlay : Overlay.overlayArray) {
+            overlay.draw();
+        }
 
         GLES20.glDisableVertexAttribArray(aPositionLoc);
         GLES20.glDisableVertexAttribArray(aTexCoordLoc);
