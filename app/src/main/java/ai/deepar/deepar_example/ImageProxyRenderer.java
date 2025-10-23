@@ -84,6 +84,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
     private int rotationDegrees = 0; // 0, 90, 180, 270
     private boolean mirrorX = false; // mirror horizontally
     private final float[] texTransform = identity3();
+    private int surfaceWidth = 0, surfaceHeight = 0;
 
     public void setMirror(boolean mirror) {
         mirrorX = mirror;
@@ -193,6 +194,8 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
 
     @Override
     public void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl, int width, int height) {
+        surfaceWidth = width;
+        surfaceHeight = height;
         GLES20.glViewport(0, 0, width, height);
     }
 
@@ -221,6 +224,9 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         if (!upload) {
             return;
         }
+
+        // Update geometry to preserve aspect ratio (fit center)
+        updateScaledPositions(w, h);
 
         GLES20.glUseProgram(program);
 
@@ -331,6 +337,39 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
 
         float[] m = multiply(t2, multiply(rot, multiply(sFlipY, multiply(sMirror, t1))));
         System.arraycopy(m, 0, texTransform, 0, 9);
+    }
+
+    private void updateScaledPositions(int imgW, int imgH) {
+        if (positionBuffer == null) {
+            return;
+        }
+        float xScale = 1f;
+        float yScale = 1f;
+        if (surfaceWidth > 0 && surfaceHeight > 0 && imgW > 0 && imgH > 0) {
+            boolean swap = Math.abs(rotationDegrees) % 180 != 0;
+            int effW = swap ? imgH : imgW;
+            int effH = swap ? imgW : imgH;
+
+            float viewAspect = (float) surfaceWidth / (float) surfaceHeight;
+            float imgAspect = (float) effW / (float) effH;
+            if (viewAspect > imgAspect) {
+                // view is wider than image; limit width
+                xScale = imgAspect / viewAspect;
+                yScale = 1f;
+            } else {
+                // view is taller than image; limit height
+                xScale = 1f;
+                yScale = viewAspect / imgAspect;
+            }
+        }
+        float[] positions = new float[]{
+                -xScale,  yScale, 0f,
+                 xScale,  yScale, 0f,
+                -xScale, -yScale, 0f,
+                 xScale, -yScale, 0f
+        };
+        positionBuffer.clear();
+        positionBuffer.put(positions).position(0);
     }
 
     private static float[] translate(float tx, float ty) {
