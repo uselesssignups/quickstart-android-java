@@ -628,7 +628,13 @@ public class WebRTCClient implements IWebRTCClient, AntMediaSignallingEvents {
                 remoteVideoSink.setTarget(renderer);
                 renderer.init(eglBase.getEglBaseContext(), null);
                 renderer.setScalingType(config.scalingType);
-                renderer.setEnableHardwareScaler(true);
+                // Disable hardware scaler for remote to prevent Surface fixed-size thrashing
+                // which may cause flicker/glitches on resolution changes
+                renderer.setEnableHardwareScaler(false);
+                // Remote view should not be mirrored
+                renderer.setMirror(false);
+                // Ensure remote renderer is not drawn as an overlay by default
+                renderer.setZOrderMediaOverlay(false);
                 renderer.setTag(renderer.getId(), remoteVideoSink);
             }
             videoTrack.addSink(remoteVideoSink);
