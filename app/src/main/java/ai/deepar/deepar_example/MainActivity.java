@@ -105,7 +105,7 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
         surfaceView.setEGLContextClientVersion(2);
         surfaceView.setEGLConfigChooser(8,8,8,8,16,0);
         if (useImageProxyRenderer) {
-            imageProxyRenderer = new ImageProxyRenderer();
+            imageProxyRenderer = new ImageProxyRenderer(webRTCClient,this);
             surfaceView.setRenderer(imageProxyRenderer);
         } else {
             renderer = new DeepARRenderer(deepAR ,webRTCClient, this);
@@ -130,15 +130,11 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
         return new DefaultWebRTCListener() {
             @Override
             public void onIceConnected(String streamId) {
-                if (renderer != null) {
-                    renderer.setCallInProgress(true);
-                }
+                    imageProxyRenderer.setCallInProgress(true);
             }
             @Override
             public void onIceDisconnected(String streamId){
-                if (renderer != null) {
-                    renderer.setCallInProgress(false);
-                }
+                    imageProxyRenderer.setCallInProgress(false);
             }
             @Override
             public void onPublishStarted(String streamId) {
@@ -281,7 +277,7 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
                     imageProxyRenderer.submitImage(
                             image,
                             isFront,
-                            applyDegrees
+                            180
                     );
                     image.close();
                     return;

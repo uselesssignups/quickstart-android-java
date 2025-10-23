@@ -1,5 +1,7 @@
 package ai.deepar.deepar_example;
 
+import android.app.Activity;
+import android.graphics.Color;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.util.Log;
@@ -114,8 +116,10 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
 
     public ImageProxyRenderer() {}
 
-    public ImageProxyRenderer(WebRTCClient webRTCClient) {
+    public Activity context;
+    public ImageProxyRenderer(WebRTCClient webRTCClient, Activity context) {
         this.webRTCClient = webRTCClient;
+        this.context = context;
     }
 
     public void setCallInProgress(boolean callInProgress) {
@@ -125,19 +129,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
     public static void setEglHandler(Handler handler) {
         eglHandler = handler;
     }
-    private WebRTCClient webRTCClient;
-    private boolean callInProgress = false;
 
-    public ImageProxyRenderer() {
-    }
-
-    public ImageProxyRenderer(WebRTCClient webRTCClient) {
-        this.webRTCClient = webRTCClient;
-    }
-
-    public void setCallInProgress(boolean callInProgress) {
-        this.callInProgress = callInProgress;
-    }
 
     public void setMirror(boolean mirror) {
         mirrorX = mirror;
@@ -263,6 +255,10 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         setupLuminanceTexture(texV);
 
         texturesInitialized = false; // will initialize dimensions on first frame
+
+        Overlay logo = new Overlay(context.getApplicationContext(),R.drawable.ic_launcher,0,0);
+        logo.setSize(0.9f);
+        new Overlay(context, "Hello", 64, Color.RED, 0f, 0f);
     }
 
     @Override
@@ -453,6 +449,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
                 }
                 if (copiedTex > 0 && eglHandler != null) {
                     // Wrap the RGBA texture with overlays applied
+                    int finalCopiedTex = copiedTex;
                     TextureBufferImpl tbuf = new TextureBufferImpl(
                             drawW, drawH,
                             VideoFrame.TextureBuffer.Type.RGB,
@@ -462,7 +459,7 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
                             yuvConverter,
                             () -> {
                                 // GL cleanup will be handled when buffer is released
-                                GLES20.glDeleteTextures(1, new int[]{copiedTex}, 0);
+                                GLES20.glDeleteTextures(1, new int[]{finalCopiedTex}, 0);
                             }
                     );
                     VideoFrame.I420Buffer i420 = yuvConverter.convert(tbuf);
