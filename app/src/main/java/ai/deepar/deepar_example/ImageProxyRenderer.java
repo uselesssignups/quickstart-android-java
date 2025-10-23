@@ -9,6 +9,7 @@ import androidx.camera.core.ImageProxy;
 
 import android.graphics.Rect;
 import android.os.SystemClock;
+import android.os.Handler;
 import android.os.SystemClock;
 
 import java.nio.ByteBuffer;
@@ -19,6 +20,9 @@ import java.util.concurrent.TimeUnit;
 
 import org.webrtc.JavaI420Buffer;
 import org.webrtc.VideoFrame;
+import org.webrtc.TextureBufferImpl;
+import org.webrtc.YuvConverter;
+import android.graphics.Matrix;
 
 import io.antmedia.webrtcandroidframework.core.CustomVideoCapturer;
 import io.antmedia.webrtcandroidframework.core.WebRTCClient;
@@ -105,6 +109,8 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
     private int surfaceWidth = 0, surfaceHeight = 0;
     private WebRTCClient webRTCClient;
     private boolean callInProgress = false;
+    private YuvConverter yuvConverter = new YuvConverter();
+    private static Handler eglHandler;
 
     public ImageProxyRenderer() {}
 
@@ -114,6 +120,10 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
 
     public void setCallInProgress(boolean callInProgress) {
         this.callInProgress = callInProgress;
+    }
+
+    public static void setEglHandler(Handler handler) {
+        eglHandler = handler;
     }
     private WebRTCClient webRTCClient;
     private boolean callInProgress = false;
@@ -361,32 +371,120 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
 
-        // Draw overlays on top (screen compositing)
-        for (Overlay overlay : Overlay.overlayArray) {
-            overlay.draw();
+        // Draw overlays onto an offscreen copy when streaming so remote also sees overlays
+        int copiedTex = -1;
+        int[] tmp1 = new int[1];
+        int[] tmp4 = new int[4];
+        GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, tmp1, 0); int prevFbo = tmp1[0];
+        GLES20.glGetIntegerv(GLES20.GL_CURRENT_PROGRAM, tmp1, 0); int prevProgram = tmp1[0];
+        GLES20.glGetIntegerv(GLES20.GL_ACTIVE_TEXTURE, tmp1, 0); int prevActive = tmp1[0];
+        GLES20.glGetIntegerv(GLES20.GL_TEXTURE_BINDING_2D, tmp1, 0); int prevTex2D = tmp1[0];
+        GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, tmp4, 0);
+        int prevVpX = tmp4[0], prevVpY = tmp4[1], prevVpW = tmp4[2], prevVpH = tmp4[3];
+
+        try {
+            if (callInProgress) {
+                // Create RGBA 2D texture target
+                int[] tex = new int[1];
+                GLES20.glGenTextures(1, tex, 0);
+                copiedTex = tex[0];
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, copiedTex);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, drawW, drawH, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+
+                // Bind FBO
+                int[] fbo = new int[1];
+                GLES20.glGenFramebuffers(1, fbo, 0);
+                int tempFbo = fbo[0];
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, tempFbo);
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, copiedTex, 0);
+
+                GLES20.glViewport(0, 0, drawW, drawH);
+
+                // Draw current YUV to this FBO by redrawing the quad
+                GLES20.glUseProgram(program);
+                GLES20.glEnableVertexAttribArray(aPositionLoc);
+                GLES20.glVertexAttribPointer(aPositionLoc, 3, GLES20.GL_FLOAT, false, 0, positionBuffer);
+                GLES20.glEnableVertexAttribArray(aTexCoordLoc);
+                GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
+                GLES20.glUniform1i(uYLoc, 0);
+                GLES20.glUniform1i(uULoc, 1);
+                GLES20.glUniform1i(uVLoc, 2);
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+
+                // Now draw overlays onto this FBO
+                for (Overlay overlay : Overlay.overlayArray) {
+                    overlay.draw();
+                }
+
+                GLES20.glFlush();
+
+                // Restore and delete FBO
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prevFbo);
+                GLES20.glDeleteFramebuffers(1, fbo, 0);
+            } else {
+                // Draw overlays on screen only
+                for (Overlay overlay : Overlay.overlayArray) {
+                    overlay.draw();
+                }
+            }
+        } finally {
+            // Restore GL state
+            GLES20.glUseProgram(prevProgram);
+            GLES20.glActiveTexture(prevActive);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, prevTex2D);
+            GLES20.glViewport(prevVpX, prevVpY, prevVpW, prevVpH);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, prevFbo);
         }
 
         GLES20.glDisableVertexAttribArray(aPositionLoc);
         GLES20.glDisableVertexAttribArray(aTexCoordLoc);
         GLES20.glUseProgram(0);
 
-        // Send to WebRTC if in call
-        if (callInProgress && webRTCClient != null && upload) {
+        // Send to WebRTC if in call — ensure overlays are included
+        if (callInProgress && webRTCClient != null) {
             long tsNs = TimeUnit.MILLISECONDS.toNanos(SystemClock.elapsedRealtime());
             try {
-                JavaI420Buffer i420 = JavaI420Buffer.wrap(
-                        w,
-                        h,
-                        y,
-                        w,
-                        u,
-                        w / 2,
-                        v,
-                        w / 2,
-                        null
-                );
-                VideoFrame vf = new VideoFrame(i420, 0, tsNs);
-                ((CustomVideoCapturer) webRTCClient.getVideoCapturer()).writeFrame(vf);
+                if (copiedTex > 0 && eglHandler == null && webRTCClient.surfaceTextureHelper != null) {
+                    eglHandler = webRTCClient.surfaceTextureHelper.getHandler();
+                }
+                if (copiedTex > 0 && eglHandler != null) {
+                    // Wrap the RGBA texture with overlays applied
+                    TextureBufferImpl tbuf = new TextureBufferImpl(
+                            drawW, drawH,
+                            VideoFrame.TextureBuffer.Type.RGB,
+                            copiedTex,
+                            new Matrix(),
+                            eglHandler,
+                            yuvConverter,
+                            () -> {
+                                // GL cleanup will be handled when buffer is released
+                                GLES20.glDeleteTextures(1, new int[]{copiedTex}, 0);
+                            }
+                    );
+                    VideoFrame.I420Buffer i420 = yuvConverter.convert(tbuf);
+                    VideoFrame vf = new VideoFrame(i420, 0, tsNs);
+                    ((CustomVideoCapturer) webRTCClient.getVideoCapturer()).writeFrame(vf);
+                    tbuf.release();
+                } else if (upload) {
+                    // Fallback: send raw I420 from planes (no overlays)
+                    JavaI420Buffer i420 = JavaI420Buffer.wrap(
+                            drawW,
+                            drawH,
+                            y,
+                            drawW,
+                            u,
+                            drawW / 2,
+                            v,
+                            drawW / 2,
+                            null
+                    );
+                    VideoFrame vf = new VideoFrame(i420, 0, tsNs);
+                    ((CustomVideoCapturer) webRTCClient.getVideoCapturer()).writeFrame(vf);
+                }
             } catch (Exception e) {
                 Log.e(TAG, "send to WebRTC failed", e);
             }
