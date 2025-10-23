@@ -129,11 +129,15 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
         return new DefaultWebRTCListener() {
             @Override
             public void onIceConnected(String streamId) {
-                renderer.setCallInProgress(true);
+                if (renderer != null) {
+                    renderer.setCallInProgress(true);
+                }
             }
             @Override
             public void onIceDisconnected(String streamId){
-                renderer.setCallInProgress(false);
+                if (renderer != null) {
+                    renderer.setCallInProgress(false);
+                }
             }
             @Override
             public void onPublishStarted(String streamId) {
@@ -261,7 +265,11 @@ public class MainActivity extends AppCompatActivity implements AREventListener {
             height = cameraPreset.getWidth();
         }
 
-        ImageAnalysis imageAnalysis = new ImageAnalysis.Builder().setTargetResolution(new Size(width, height)).setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build();
+        ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
+                .setTargetResolution(new Size(width, height))
+                .setTargetRotation(getWindowManager().getDefaultDisplay().getRotation())
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build();
         imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this), new ImageAnalysis.Analyzer() {
             @Override
             public void analyze(@NonNull ImageProxy image) {

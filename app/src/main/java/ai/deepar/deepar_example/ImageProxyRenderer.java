@@ -99,7 +99,9 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         final int width = image.getWidth();
         final int height = image.getHeight();
         setMirror(mirror);
-        setRotationDegrees(rotationDegrees);
+        // CameraX gives clockwise rotation needed to display upright.
+        // Rotate sampling in the opposite direction to correct orientation.
+        setRotationDegrees(-rotationDegrees);
 
         ImageProxy.PlaneProxy yPlane = image.getPlanes()[0];
         ImageProxy.PlaneProxy uPlane = image.getPlanes()[1];
