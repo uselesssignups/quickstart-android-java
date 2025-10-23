@@ -7,6 +7,8 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.camera.core.ImageProxy;
 
+import android.graphics.Rect;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -97,8 +99,10 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
     }
 
     public void submitImage(@NonNull ImageProxy image, boolean mirror, int rotationDegrees) {
-        final int width = image.getWidth();
-        final int height = image.getHeight();
+        final Rect crop = image.getCropRect();
+        // Use crop rect to avoid CameraX-imposed center crop causing apparent zoom
+        final int width = crop.width();
+        final int height = crop.height();
         setMirror(mirror);
         // CameraX gives clockwise rotation needed to display upright.
         // Rotate sampling in the opposite direction to correct orientation.
@@ -111,11 +115,17 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         int yRowStride = yPlane.getRowStride();
         int uRowStride = uPlane.getRowStride();
         int vRowStride = vPlane.getRowStride();
+        int yPixelStride = yPlane.getPixelStride();
         int uPixelStride = uPlane.getPixelStride();
         int vPixelStride = vPlane.getPixelStride();
 
         int chromaWidth = width / 2;
         int chromaHeight = height / 2;
+        // Offsets into planes for crop rect (guaranteed even for 420)
+        int cropLeft = crop.left;
+        int cropTop = crop.top;
+        int chromaCropLeft = cropLeft / 2;
+        int chromaCropTop = cropTop / 2;
 
         // Ensure buffers allocated
         frameLock.lock();
@@ -135,18 +145,31 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
 
             ByteBuffer yBuf = yPlane.getBuffer();
             for (int row = 0; row < height; row++) {
-                int rowStart = row * yRowStride;
-                for (int col = 0; col < width; col++) {
-                    yData.put(yBuf.get(rowStart + col));
+                int srcRow = cropTop + row;
+                int rowStart = srcRow * yRowStride + cropLeft * yPixelStride;
+                if (yPixelStride == 1) {
+                    // Fast path: contiguous bytes
+                    int oldPos = yBuf.position();
+                    yBuf.position(rowStart);
+                    for (int col = 0; col < width; col++) {
+                        yData.put(yBuf.get());
+                    }
+                    yBuf.position(oldPos);
+                } else {
+                    for (int col = 0; col < width; col++) {
+                        yData.put(yBuf.get(rowStart + col * yPixelStride));
+                    }
                 }
             }
 
             ByteBuffer uBuf = uPlane.getBuffer();
             ByteBuffer vBuf = vPlane.getBuffer();
             for (int row = 0; row < chromaHeight; row++) {
+                int srcRow = chromaCropTop + row;
                 for (int col = 0; col < chromaWidth; col++) {
-                    uData.put(uBuf.get(row * uRowStride + col * uPixelStride));
-                    vData.put(vBuf.get(row * vRowStride + col * vPixelStride));
+                    int srcCol = chromaCropLeft + col;
+                    uData.put(uBuf.get(srcRow * uRowStride + srcCol * uPixelStride));
+                    vData.put(vBuf.get(srcRow * vRowStride + srcCol * vPixelStride));
                 }
             }
 
