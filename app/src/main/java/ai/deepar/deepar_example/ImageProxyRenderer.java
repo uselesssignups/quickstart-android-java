@@ -8,11 +8,27 @@ import androidx.annotation.NonNull;
 import androidx.camera.core.ImageProxy;
 
 import android.graphics.Rect;
+import android.os.SystemClock;
+import android.os.SystemClock;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.TimeUnit;
+
+import org.webrtc.JavaI420Buffer;
+import org.webrtc.VideoFrame;
+
+import io.antmedia.webrtcandroidframework.core.CustomVideoCapturer;
+import io.antmedia.webrtcandroidframework.core.WebRTCClient;
+import java.util.concurrent.TimeUnit;
+
+import org.webrtc.JavaI420Buffer;
+import org.webrtc.VideoFrame;
+
+import io.antmedia.webrtcandroidframework.core.CustomVideoCapturer;
+import io.antmedia.webrtcandroidframework.core.WebRTCClient;
 
 /**
  * Renderer that takes CameraX ImageProxy frames and renders them directly via OpenGL.
@@ -87,6 +103,31 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
     private boolean mirrorX = false; // mirror horizontally
     private final float[] texTransform = identity3();
     private int surfaceWidth = 0, surfaceHeight = 0;
+    private WebRTCClient webRTCClient;
+    private boolean callInProgress = false;
+
+    public ImageProxyRenderer() {}
+
+    public ImageProxyRenderer(WebRTCClient webRTCClient) {
+        this.webRTCClient = webRTCClient;
+    }
+
+    public void setCallInProgress(boolean callInProgress) {
+        this.callInProgress = callInProgress;
+    }
+    private WebRTCClient webRTCClient;
+    private boolean callInProgress = false;
+
+    public ImageProxyRenderer() {
+    }
+
+    public ImageProxyRenderer(WebRTCClient webRTCClient) {
+        this.webRTCClient = webRTCClient;
+    }
+
+    public void setCallInProgress(boolean callInProgress) {
+        this.callInProgress = callInProgress;
+    }
 
     public void setMirror(boolean mirror) {
         mirrorX = mirror;
@@ -320,6 +361,28 @@ public class ImageProxyRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisableVertexAttribArray(aPositionLoc);
         GLES20.glDisableVertexAttribArray(aTexCoordLoc);
         GLES20.glUseProgram(0);
+
+        // Send to WebRTC if in call
+        if (callInProgress && webRTCClient != null && upload) {
+            long tsNs = TimeUnit.MILLISECONDS.toNanos(SystemClock.elapsedRealtime());
+            try {
+                JavaI420Buffer i420 = JavaI420Buffer.wrap(
+                        w,
+                        h,
+                        y,
+                        w,
+                        u,
+                        w / 2,
+                        v,
+                        w / 2,
+                        null
+                );
+                VideoFrame vf = new VideoFrame(i420, 0, tsNs);
+                ((CustomVideoCapturer) webRTCClient.getVideoCapturer()).writeFrame(vf);
+            } catch (Exception e) {
+                Log.e(TAG, "send to WebRTC failed", e);
+            }
+        }
     }
 
     private static void setupLuminanceTexture(int texId) {
